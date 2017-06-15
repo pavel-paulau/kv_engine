@@ -10,8 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <platform/cb_malloc.h>
-#include <platform/platform.h>
 #include <platform/crc32c.h>
+#include <platform/platform.h>
+#include <platform/processclock.h>
 #include <platform/strerror.h>
 
 #include "default_engine_internal.h"
@@ -21,6 +22,32 @@
 
 /* One hashtable for all */
 static struct assoc* global_assoc = NULL;
+
+static void assoc_expand(struct default_engine *engine);
+
+/**
+ * Check to see if we should start hashtable expansion
+ *
+ * assoc->lock is assumed to be held by the caller.
+ */
+static inline void maybe_start_assoc_expand(struct default_engine* engine) {
+    if (!engine->assoc->expanding &&
+        engine->assoc->hash_items > (hashsize(engine->assoc->hashpower) * 3) / 2) {
+        assoc_expand(engine);
+    }
+}
+
+/**
+ * Check if we need a rebalance or not (this is only to be called from the
+ * stats so that we can determine if we want to keep on driving traffic
+ * until the hashtable reached the correct size (used in for a benchmark
+ * test where we've got a populate phase followed by a test phase)
+ *
+ * assoc->lock is assumed to be held by the caller!!!
+ */
+bool assoc_need_rebalance(struct default_engine* engine) {
+    return engine->assoc->hash_items > (hashsize(engine->assoc->hashpower) * 3) / 2;
+}
 
 /* assoc factory. returns one new assoc or NULL if out-of-memory */
 static struct assoc* assoc_consruct(int hashpower) {
@@ -93,6 +120,7 @@ hash_item *assoc_find(struct default_engine *engine, uint32_t hash, const hash_k
         ++depth;
     }
     MEMCACHED_ASSOC_FIND(hash_key_get_key(key), hash_key_get_key_len(key), depth);
+    maybe_start_assoc_expand(engine);
     cb_mutex_exit(&engine->assoc->lock);
     return ret;
 }
@@ -189,9 +217,7 @@ int assoc_insert(struct default_engine *engine, uint32_t hash, hash_item *it) {
     }
 
     engine->assoc->hash_items++;
-    if (! engine->assoc->expanding && engine->assoc->hash_items > (hashsize(engine->assoc->hashpower) * 3) / 2) {
-        assoc_expand(engine);
-    }
+    maybe_start_assoc_expand(engine);
     cb_mutex_exit(&engine->assoc->lock);
     MEMCACHED_ASSOC_INSERT(hash_key_get_key(item_get_key(it)), hash_key_get_key_len(item_get_key(it)), engine->assoc->hash_items);
     return 1;
@@ -229,6 +255,15 @@ int hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
 
 static void assoc_maintenance_thread(void *arg) {
     struct default_engine *engine = static_cast<struct default_engine*>(arg);
+    EXTENSION_LOGGER_DESCRIPTOR *logger;
+
+    logger = static_cast<EXTENSION_LOGGER_DESCRIPTOR*>
+    (engine->server.extension->get_extension(EXTENSION_LOGGER));
+
+    logger->log(EXTENSION_LOG_NOTICE, nullptr,
+                "Starting hash table expansion for memcached buckets");
+
+    const auto start = ProcessClock::now();
     bool done = false;
     do {
         int ii;
@@ -254,13 +289,6 @@ static void assoc_maintenance_thread(void *arg) {
             if (engine->assoc->expand_bucket == hashsize(engine->assoc->hashpower - 1)) {
                 engine->assoc->expanding = false;
                 cb_free(engine->assoc->old_hashtable);
-                if (engine->config.verbose > 1) {
-                    EXTENSION_LOGGER_DESCRIPTOR *logger;
-                    logger = static_cast<EXTENSION_LOGGER_DESCRIPTOR*>
-                        (engine->server.extension->get_extension(EXTENSION_LOGGER));
-                    logger->log(EXTENSION_LOG_INFO, NULL,
-                                "Hash table expansion done\n");
-                }
             }
         }
         if (!engine->assoc->expanding) {
@@ -268,4 +296,9 @@ static void assoc_maintenance_thread(void *arg) {
         }
         cb_mutex_exit(&engine->assoc->lock);
     } while (!done);
+
+    const auto stop = ProcessClock::now();
+    logger->log(EXTENSION_LOG_NOTICE, nullptr,
+                "Completed hash table expansion memcached buckets. Duration: %s",
+                to_string(stop - start).c_str());
 }

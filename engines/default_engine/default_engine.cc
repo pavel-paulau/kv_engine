@@ -587,7 +587,24 @@ static ENGINE_ERROR_CODE default_get_stats(ENGINE_HANDLE* handle,
    } else if (strncmp(stat_key, "items", 5) == 0) {
       item_stats(engine, add_stat, cookie);
    } else if (strncmp(stat_key, "sizes", 5) == 0) {
-      item_stats_sizes(engine, add_stat, cookie);
+       item_stats_sizes(engine, add_stat, cookie);
+   } else if (strncmp(stat_key, "assoc", 5) == 0) {
+       bool expanding;
+       bool need_rebalance;
+
+       cb_mutex_enter(&engine->assoc->lock);
+       expanding = engine->assoc->expanding;
+       need_rebalance = assoc_need_rebalance(engine);
+       cb_mutex_exit(&engine->assoc->lock);
+
+       char val[128];
+       int len;
+       len = sprintf(val, "%s", expanding ? "true" : "false");
+       add_stat("assoc_running_rebalance", strlen("assoc_running_rebalance"),
+                val, len, cookie);
+       len = sprintf(val, "%s", need_rebalance ? "true" : "false");
+       add_stat("assoc_need_rebalance", strlen("assoc_need_rebalance"), val,
+                len, cookie);
    } else if (strncmp(stat_key, "uuid", 4) == 0) {
        if (engine->config.uuid) {
            add_stat("uuid", 4, engine->config.uuid,

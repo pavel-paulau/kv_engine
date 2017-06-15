@@ -45,5 +45,6 @@ void assoc_delete(struct default_engine *engine, uint32_t hash,
                   const hash_key* key);
 int start_assoc_maintenance_thread(struct default_engine *engine);
 void stop_assoc_maintenance_thread(struct default_engine *engine);
+bool assoc_need_rebalance(struct default_engine* engine);
 
 #endif
